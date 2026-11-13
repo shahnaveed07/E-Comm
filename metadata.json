@@ -1,0 +1,6 @@
+{
+  "name": "Sylvan Grove",
+  "description": "Organic heirloom walnuts, almonds, and tree nuts e-commerce storefront with personalized recommendations, account order tracking, and a live admin order management dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
