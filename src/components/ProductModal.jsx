@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ShoppingBag, X } from 'lucide-react';
 import { WEIGHT_OPTIONS } from '../data/catalog.js';
-import { calculateUnitPrice, formatCurrency } from '../utils/commerce.js';
+import { calculateUnitPrice, formatCurrency, getVariantAvailableStock } from '../utils/commerce.js';
 import { ProductReviews } from './ProductReviews.jsx';
 
 export const ProductModal = ({
@@ -9,6 +9,7 @@ export const ProductModal = ({
   reviews,
   orders,
   currentUser,
+  currency = 'USD',
   onClose,
   onAddToCart,
   onSubmitReview,
@@ -16,9 +17,11 @@ export const ProductModal = ({
   onRequestAuth,
 }) => {
   const [weightSize, setWeightSize] = useState('16oz');
+  const [activeImageUrl, setActiveImageUrl] = useState('');
 
   useEffect(() => {
     if (!product) return;
+    setActiveImageUrl(product.imageUrl || product.images?.[0]?.url || '');
     const handleKey = (e) => {
       if (e.key === 'Escape') onClose();
     };
@@ -28,7 +31,13 @@ export const ProductModal = ({
 
   if (!product) return null;
 
-  const activePrice = calculateUnitPrice(product.basePrice16oz, weightSize);
+  const activePrice = calculateUnitPrice(product.basePrice16oz, weightSize, product);
+  const availableStock = getVariantAvailableStock(product, weightSize);
+  const outOfStock = availableStock <= 0;
+  const gallery =
+    Array.isArray(product.images) && product.images.length > 0
+      ? product.images
+      : [{ id: 'primary', url: product.imageUrl, altText: product.name }];
 
   return (
     <div
@@ -51,13 +60,33 @@ export const ProductModal = ({
         </button>
 
         <div className="grid grid-cols-1 md:grid-cols-2">
-          <div className="aspect-[4/3] md:aspect-auto md:h-full bg-[#EBE2D3]">
-            <img
-              src={product.imageUrl}
-              alt={`${product.name} harvest view`}
-              referrerPolicy="no-referrer"
-              className="w-full h-full object-cover"
-            />
+          <div className="bg-[#EBE2D3] flex flex-col">
+            <div className="aspect-[4/3] md:flex-1">
+              <img
+                src={activeImageUrl || product.imageUrl}
+                alt={`${product.name} harvest view`}
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover"
+              />
+            </div>
+            {gallery.length > 1 && (
+              <div className="p-2.5 flex gap-2 bg-[#F6F1E9] border-t border-[#D8CCB8] overflow-x-auto">
+                {gallery.map((img) => (
+                  <button
+                    key={img.id || img.url}
+                    type="button"
+                    onClick={() => setActiveImageUrl(img.url)}
+                    className={`w-14 h-14 rounded overflow-hidden border-2 shrink-0 cursor-pointer ${
+                      (activeImageUrl || product.imageUrl) === img.url
+                        ? 'border-[#1B3B2B]'
+                        : 'border-transparent opacity-75 hover:opacity-100'
+                    }`}
+                  >
+                    <img src={img.url} alt={img.altText || product.name} className="w-full h-full object-cover" />
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="p-6 sm:p-8 flex flex-col justify-between">
@@ -77,10 +106,13 @@ export const ProductModal = ({
 
               <div className="mt-2 flex items-baseline gap-2.5">
                 <span className="font-mono tabular-nums text-xl font-semibold text-[#1B3B2B]">
-                  {formatCurrency(activePrice)}
+                  {formatCurrency(activePrice, product.currency || currency)}
                 </span>
                 <span className="text-xs text-[#4B5548]">
                   {WEIGHT_OPTIONS[weightSize].label}
+                </span>
+                <span className="text-xs font-mono tabular-nums text-[#4B5548] ml-auto">
+                  {outOfStock ? 'Out of stock' : `${availableStock} in stock`}
                 </span>
               </div>
 
@@ -150,14 +182,19 @@ export const ProductModal = ({
             <div className="mt-6">
               <button
                 type="button"
+                disabled={outOfStock}
                 onClick={() => {
                   onAddToCart(product, weightSize);
                   onClose();
                 }}
-                className="w-full min-h-[46px] px-4 py-2.5 rounded-md bg-[#1B3B2B] text-[#FCFAF6] text-sm font-semibold inline-flex items-center justify-center gap-2 hover:bg-[#142C20] transition-colors cursor-pointer"
+                className="w-full min-h-[46px] px-4 py-2.5 rounded-md bg-[#1B3B2B] text-[#FCFAF6] text-sm font-semibold inline-flex items-center justify-center gap-2 hover:bg-[#142C20] disabled:bg-[#EBE2D3] disabled:text-[#4B5548] transition-colors cursor-pointer"
               >
                 <ShoppingBag className="w-4 h-4" aria-hidden="true" />
-                <span>Add to Bag · {formatCurrency(activePrice)}</span>
+                <span>
+                  {outOfStock
+                    ? 'Variant Out of Stock'
+                    : `Add to Bag · ${formatCurrency(activePrice, product.currency || currency)}`}
+                </span>
               </button>
             </div>
           </div>

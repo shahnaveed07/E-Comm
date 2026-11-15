@@ -1,7 +1,12 @@
 import { useMemo, useState } from 'react';
-import { Check, Leaf, Search, Star } from 'lucide-react';
+import { Check, Heart, Leaf, Search, Star } from 'lucide-react';
 import { WEIGHT_OPTIONS } from '../data/catalog.js';
-import { calculateProductRatingSummary, calculateUnitPrice, formatCurrency } from '../utils/commerce.js';
+import {
+  calculateProductRatingSummary,
+  calculateUnitPrice,
+  formatCurrency,
+  getVariantAvailableStock,
+} from '../utils/commerce.js';
 
 const CATEGORY_FILTERS = [
   { id: 'all', label: 'All Harvests' },
@@ -18,9 +23,24 @@ const ROAST_FILTERS = [
   { id: 'lightly_salted', label: 'Lightly Sea Salted' },
 ];
 
-export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectProduct }) => {
+const PRICE_FILTERS = [
+  { id: 'all', label: 'All Prices' },
+  { id: 'under_22', label: 'Under $22 (16 oz)' },
+  { id: '22_plus', label: '$22+ Reserve' },
+];
+
+export const ProductCatalog = ({
+  catalog,
+  reviews = [],
+  wishlistProductIds = [],
+  currency = 'USD',
+  onAddToCart,
+  onSelectProduct,
+  onToggleWishlist,
+}) => {
   const [category, setCategory] = useState('all');
   const [roast, setRoast] = useState('all');
+  const [priceFilter, setPriceFilter] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedWeights, setSelectedWeights] = useState({});
   const [justAddedId, setJustAddedId] = useState(null);
@@ -31,13 +51,15 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
     return catalog.filter((product) => {
       if (category !== 'all' && product.category !== category) return false;
       if (roast !== 'all' && product.roastProfile !== roast) return false;
+      if (priceFilter === 'under_22' && Number(product.basePrice16oz) >= 22) return false;
+      if (priceFilter === '22_plus' && Number(product.basePrice16oz) < 22) return false;
       if (q) {
         const hay = `${product.name} ${product.origin} ${product.shortDescription} ${product.roastLabel}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [catalog, category, roast, searchQuery]);
+  }, [catalog, category, roast, priceFilter, searchQuery]);
 
   const handleAdd = (product) => {
     const weight = selectedWeights[product.id] ?? '16oz';
@@ -111,7 +133,7 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
             })}
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-3 shrink-0">
             <label htmlFor="roast-filter" className="text-xs font-medium text-[#4B5548] whitespace-nowrap">
               Roast profile
             </label>
@@ -122,6 +144,22 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
               className="min-h-[40px] px-3 py-1.5 rounded-md border border-[#D8CCB8] bg-[#FCFAF6] text-sm text-[#1C1915]"
             >
               {ROAST_FILTERS.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+
+            <label htmlFor="price-filter" className="text-xs font-medium text-[#4B5548] whitespace-nowrap">
+              Price
+            </label>
+            <select
+              id="price-filter"
+              value={priceFilter}
+              onChange={(e) => setPriceFilter(e.target.value)}
+              className="min-h-[40px] px-3 py-1.5 rounded-md border border-[#D8CCB8] bg-[#FCFAF6] text-sm text-[#1C1915]"
+            >
+              {PRICE_FILTERS.map((opt) => (
                 <option key={opt.id} value={opt.id}>
                   {opt.label}
                 </option>
@@ -143,6 +181,7 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
               onClick={() => {
                 setCategory('all');
                 setRoast('all');
+                setPriceFilter('all');
                 setSearchQuery('');
               }}
               className="min-h-[44px] px-5 py-2.5 rounded-md bg-[#1B3B2B] text-[#FCFAF6] text-sm font-medium hover:bg-[#142C20] transition-colors cursor-pointer"
@@ -154,37 +193,56 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 sm:gap-8">
             {filteredProducts.map((product) => {
               const weight = selectedWeights[product.id] ?? '16oz';
-              const activePrice = calculateUnitPrice(product.basePrice16oz, weight);
+              const activePrice = calculateUnitPrice(product.basePrice16oz, weight, product);
+              const availableStock = getVariantAvailableStock(product, weight);
+              const outOfStock = availableStock <= 0;
               const isAdded = justAddedId === product.id;
+              const isWishlisted = wishlistProductIds.includes(product.id);
 
               return (
                 <article
                   key={product.id}
                   className="flex flex-col rounded-xl border border-[#D8CCB8] bg-[#FCFAF6] overflow-hidden transition-transform duration-150 hover:-translate-y-0.5"
                 >
-                  <button
-                    type="button"
-                    onClick={() => onSelectProduct(product)}
-                    aria-label={`View harvest details for ${product.name}`}
-                    className="relative aspect-[4/3] w-full bg-[#EBE2D3] overflow-hidden text-left cursor-pointer group"
-                  >
-                    {!failedImages[product.id] ? (
-                      <img
-                        src={product.imageUrl}
-                        alt={`${product.name} from ${product.origin}`}
-                        referrerPolicy="no-referrer"
-                        onError={() =>
-                          setFailedImages((prev) => ({ ...prev, [product.id]: true }))
-                        }
-                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
-                      />
-                    ) : (
-                      <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-[#EBE2D3] text-[#1B3B2B]">
-                        <Leaf className="w-8 h-8 mb-2" aria-hidden="true" />
-                        <span className="font-display font-medium text-base">{product.name}</span>
-                      </div>
+                  <div className="relative aspect-[4/3] w-full bg-[#EBE2D3] overflow-hidden group">
+                    <button
+                      type="button"
+                      onClick={() => onSelectProduct(product)}
+                      aria-label={`View harvest details for ${product.name}`}
+                      className="w-full h-full text-left cursor-pointer"
+                    >
+                      {!failedImages[product.id] ? (
+                        <img
+                          src={product.imageUrl}
+                          alt={`${product.name} from ${product.origin}`}
+                          referrerPolicy="no-referrer"
+                          onError={() =>
+                            setFailedImages((prev) => ({ ...prev, [product.id]: true }))
+                          }
+                          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
+                        />
+                      ) : (
+                        <div className="w-full h-full flex flex-col items-center justify-center p-6 bg-[#EBE2D3] text-[#1B3B2B]">
+                          <Leaf className="w-8 h-8 mb-2" aria-hidden="true" />
+                          <span className="font-display font-medium text-base">{product.name}</span>
+                        </div>
+                      )}
+                    </button>
+
+                    {onToggleWishlist && (
+                      <button
+                        type="button"
+                        onClick={() => onToggleWishlist(product.id, !isWishlisted)}
+                        aria-label={isWishlisted ? `Remove ${product.name} from saved harvests` : `Save ${product.name} to wishlist`}
+                        className="absolute top-3 right-3 w-9 h-9 rounded-full bg-[#FCFAF6]/90 border border-[#D8CCB8] flex items-center justify-center text-[#7A3E1C] hover:bg-[#FCFAF6] cursor-pointer"
+                      >
+                        <Heart
+                          className={`w-4 h-4 ${isWishlisted ? 'fill-[#7A3E1C]' : ''}`}
+                          aria-hidden="true"
+                        />
+                      </button>
                     )}
-                  </button>
+                  </div>
 
                   <div className="p-5 sm:p-6 flex flex-col flex-1">
                     <p className="text-xs text-[#4B5548] flex items-center gap-1.5 flex-wrap">
@@ -211,7 +269,7 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
                       </h3>
                       <div className="text-right shrink-0">
                         <span className="font-mono tabular-nums text-base font-semibold text-[#1C1915]">
-                          {formatCurrency(activePrice)}
+                          {formatCurrency(activePrice, product.currency || currency)}
                         </span>
                         <span className="block text-[11px] text-[#4B5548]">
                           {WEIGHT_OPTIONS[weight].label}
@@ -225,7 +283,13 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
 
                     <div className="mt-3 mb-4 flex items-center justify-between gap-2">
                       <p className="text-xs font-medium text-[#1B3B2B]">
-                        {product.nutritionPerServing.highlightNutrient}
+                        {outOfStock ? (
+                          <span className="text-[#9E2A2B]">Out of Stock ({WEIGHT_OPTIONS[weight].size})</span>
+                        ) : availableStock <= 8 ? (
+                          <span className="text-[#7A3E1C]">Low stock · {availableStock} left</span>
+                        ) : (
+                          product.nutritionPerServing.highlightNutrient
+                        )}
                       </p>
 
                       {(() => {
@@ -283,14 +347,19 @@ export const ProductCatalog = ({ catalog, reviews = [], onAddToCart, onSelectPro
                       <div className="pt-1 flex items-center gap-2">
                         <button
                           type="button"
+                          disabled={outOfStock}
                           onClick={() => handleAdd(product)}
-                          className={`flex-1 min-h-[44px] px-4 py-2.5 rounded-md text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer ${
-                            isAdded
-                              ? 'bg-[#2C593F] text-white'
-                              : 'bg-[#1B3B2B] text-[#FCFAF6] hover:bg-[#142C20]'
+                          className={`flex-1 min-h-[44px] px-4 py-2.5 rounded-md text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors ${
+                            outOfStock
+                              ? 'bg-[#EBE2D3] text-[#4B5548] cursor-not-allowed'
+                              : isAdded
+                                ? 'bg-[#2C593F] text-white cursor-pointer'
+                                : 'bg-[#1B3B2B] text-[#FCFAF6] hover:bg-[#142C20] cursor-pointer'
                           }`}
                         >
-                          {isAdded ? (
+                          {outOfStock ? (
+                            <span>Sold Out</span>
+                          ) : isAdded ? (
                             <>
                               <Check className="w-4 h-4" aria-hidden="true" />
                               <span>Added to Bag</span>

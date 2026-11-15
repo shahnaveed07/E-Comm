@@ -1,14 +1,23 @@
 import React, { useState } from 'react';
-import { CreditCard, Lock, Plus, Trash2 } from 'lucide-react';
+import { CreditCard, FileDown, Lock, Plus, Trash2 } from 'lucide-react';
 import {
   formatCurrency,
   formatReadableDate,
   validatePaymentCard,
 } from '../../utils/commerce.js';
 
+function formatInvoiceStatus(status) {
+  const s = String(status || 'paid').toLowerCase();
+  if (s === 'paid') return { label: 'Paid', cls: 'text-[#1B3B2B]' };
+  if (s === 'refunded') return { label: 'Refunded', cls: 'text-[#4B5548]' };
+  if (s === 'void') return { label: 'Void', cls: 'text-[#9E2A2B]' };
+  return { label: 'Unpaid', cls: 'text-[#7A3E1C]' };
+}
+
 export const BillingTab = ({
   paymentMethods,
   invoices,
+  currency = 'USD',
   onAddPaymentMethod,
   onSetDefaultCard,
   onRemoveCard,
@@ -335,27 +344,46 @@ export const BillingTab = ({
                 <th scope="col" className="py-3 pr-4">Description</th>
                 <th scope="col" className="py-3 pr-4">Payment Method</th>
                 <th scope="col" className="py-3 pr-4">Status</th>
-                <th scope="col" className="py-3 text-right">Amount</th>
+                <th scope="col" className="py-3 pr-4 text-right">Amount</th>
+                <th scope="col" className="py-3 text-right">Invoice</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#EBE2D3]">
-              {invoices.map((inv) => (
-                <tr key={inv.id}>
-                  <td className="py-3.5 pr-4 font-mono tabular-nums text-xs text-[#4B5548] whitespace-nowrap">
-                    {formatReadableDate(inv.date)}
-                  </td>
-                  <td className="py-3.5 pr-4 font-medium text-[#1C1915]">{inv.description}</td>
-                  <td className="py-3.5 pr-4 text-[#4B5548] whitespace-nowrap">
-                    {inv.paymentMethodSummary}
-                  </td>
-                  <td className="py-3.5 pr-4 whitespace-nowrap">
-                    <span className="font-medium text-[#1B3B2B]">Paid</span>
-                  </td>
-                  <td className="py-3.5 text-right font-mono tabular-nums font-semibold text-[#1C1915] whitespace-nowrap">
-                    {formatCurrency(inv.amount)}
-                  </td>
-                </tr>
-              ))}
+              {invoices.map((inv) => {
+                const st = formatInvoiceStatus(inv.status);
+                return (
+                  <tr key={inv.id}>
+                    <td className="py-3.5 pr-4 font-mono tabular-nums text-xs text-[#4B5548] whitespace-nowrap">
+                      {formatReadableDate(inv.date)}
+                    </td>
+                    <td className="py-3.5 pr-4 font-medium text-[#1C1915]">{inv.description}</td>
+                    <td className="py-3.5 pr-4 text-[#4B5548] whitespace-nowrap">
+                      {inv.paymentMethodSummary}
+                    </td>
+                    <td className="py-3.5 pr-4 whitespace-nowrap">
+                      <span className={`font-medium ${st.cls}`}>{st.label}</span>
+                    </td>
+                    <td className="py-3.5 pr-4 text-right font-mono tabular-nums font-semibold text-[#1C1915] whitespace-nowrap">
+                      {formatCurrency(inv.amount, inv.currency || currency)}
+                    </td>
+                    <td className="py-3.5 text-right whitespace-nowrap">
+                      {inv.orderId ? (
+                        <a
+                          href={`/api/orders/${encodeURIComponent(inv.orderId)}/invoice.pdf`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 text-xs font-semibold text-[#1B3B2B] hover:underline"
+                        >
+                          <FileDown className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>PDF</span>
+                        </a>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

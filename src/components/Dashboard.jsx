@@ -32,12 +32,14 @@ const GOAL_LABELS = {
 const TABS = [
   { id: 'overview', label: 'Account Overview', icon: LayoutDashboard },
   { id: 'orders', label: 'Order History', icon: Package },
-  { id: 'preferences', label: 'Preferences', icon: SlidersHorizontal },
-  { id: 'billing', label: 'Payment Cards', icon: CreditCard },
+  { id: 'preferences', label: 'Preferences & Addresses', icon: SlidersHorizontal },
+  { id: 'billing', label: 'Payment Cards & Invoices', icon: CreditCard },
 ];
 
 function getOrderStatusLabel(status) {
   switch (status) {
+    case 'awaiting_payment':
+      return 'Awaiting Payment';
     case 'placed':
       return 'Order Placed';
     case 'packed':
@@ -64,8 +66,23 @@ export const Dashboard = ({
   onRemoveCard,
   onReorderOrder,
   onReviewProduct,
+  onPayOrderUpi,
+  onRefreshState,
+  onToggleWishlist,
 }) => {
-  const { preferences, paymentMethods, invoices, orders, user } = state;
+  const {
+    preferences,
+    addresses = [],
+    wishlistProductIds = [],
+    paymentMethods,
+    invoices,
+    orders,
+    returnRequests = [],
+    catalog = [],
+    storeConfig,
+    user,
+  } = state;
+  const currency = storeConfig?.currency || 'USD';
   const displayName = preferences.shippingAddress.fullName || user?.fullName || 'Orchard Member';
   const liveOrders = orders.filter((o) => o.isLive !== false);
   const recentOrders = liveOrders.slice(0, 4);
@@ -73,7 +90,7 @@ export const Dashboard = ({
     (o) => o.status !== 'delivered' && o.status !== 'cancelled'
   ).length;
   const totalSpent = liveOrders
-    .filter((o) => o.status !== 'cancelled')
+    .filter((o) => o.status !== 'cancelled' && (!o.paymentStatus || o.paymentStatus === 'CAPTURED'))
     .reduce((sum, o) => sum + o.total, 0);
   const defaultCard = paymentMethods.find((pm) => pm.isDefault) || paymentMethods[0];
 
@@ -135,7 +152,7 @@ export const Dashboard = ({
             <dd className="mt-1 font-mono tabular-nums text-base sm:text-lg font-semibold text-[#1C1915]">
               {liveOrders.length}
               <span className="block font-sans text-xs font-normal text-[#4B5548]">
-                {formatCurrency(totalSpent)} spent
+                {formatCurrency(totalSpent, currency)} verified spend
               </span>
             </dd>
           </div>
@@ -275,7 +292,7 @@ export const Dashboard = ({
 
                         <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
                           <span className="font-mono tabular-nums text-base font-semibold text-[#1C1915]">
-                            {formatCurrency(order.total)}
+                            {formatCurrency(order.total, order.currency || currency)}
                           </span>
                           <button
                             type="button"
@@ -415,15 +432,24 @@ export const Dashboard = ({
           {activeTab === 'orders' && (
             <OrdersTab
               orders={orders}
+              returnRequests={returnRequests}
               onReorderOrder={onReorderOrder}
               onReviewProduct={onReviewProduct}
+              onPayOrderUpi={onPayOrderUpi}
+              onRefreshState={onRefreshState}
             />
           )}
 
           {activeTab === 'preferences' && (
             <PreferencesTab
               preferences={preferences}
+              addresses={addresses}
+              wishlistProductIds={wishlistProductIds}
+              catalog={catalog}
+              currency={currency}
               onUpdatePreferences={onUpdatePreferences}
+              onRefreshState={onRefreshState}
+              onToggleWishlist={onToggleWishlist}
             />
           )}
 
@@ -431,6 +457,7 @@ export const Dashboard = ({
             <BillingTab
               paymentMethods={paymentMethods}
               invoices={invoices}
+              currency={currency}
               onAddPaymentMethod={onAddPaymentMethod}
               onSetDefaultCard={onSetDefaultCard}
               onRemoveCard={onRemoveCard}

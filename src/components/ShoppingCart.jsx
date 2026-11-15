@@ -1,12 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, CreditCard, Lock, Minus, Plus, ShieldCheck, Trash2, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  Clock,
+  CreditCard,
+  Lock,
+  Minus,
+  Plus,
+  QrCode,
+  RefreshCw,
+  ShieldCheck,
+  Tag,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { FREE_SHIPPING_THRESHOLD, WEIGHT_OPTIONS } from '../data/catalog.js';
+import { apiFetch } from '../services/api.js';
 import {
   calculateCartTotals,
   calculateUnitPrice,
   canCheckout,
   formatCurrency,
   validatePaymentCard,
+  validateUtrFormat,
 } from '../utils/commerce.js';
 import { AuthPanel } from './AuthPanel.jsx';
 
@@ -16,11 +31,16 @@ export const ShoppingCart = ({
   catalog,
   currentUser,
   paymentMethods,
+  addresses = [],
   shippingAddress,
+  storeConfig,
+  resumeUpiOrder = null,
+  onClearResumeOrder,
   onClose,
   onUpdateQuantity,
   onPlaceOrder,
   onAddPaymentMethod,
+  onRefreshState,
   onLogin,
   onRegister,
   onTrackNewOrder,
@@ -29,6 +49,7 @@ export const ShoppingCart = ({
   const [selectedCardId, setSelectedCardId] = useState(
     paymentMethods.find((pm) => pm.isDefault)?.id || paymentMethods[0]?.id || ''
   );
+  const [paymentProvider, setPaymentProvider] = useState('CARD_TOKEN');
   const [address, setAddress] = useState(shippingAddress);
   const [showNewCard, setShowNewCard] = useState(paymentMethods.length === 0);
   const [cardNumber, setCardNumber] = useState('');
@@ -38,11 +59,26 @@ export const ShoppingCart = ({
   const [cvc, setCvc] = useState('');
   const [billingZip, setBillingZip] = useState('');
   const [cardErrors, setCardErrors] = useState({});
+
+  const [couponInput, setCouponInput] = useState('');
+  const [appliedCoupon, setAppliedCoupon] = useState(null);
+  const [couponError, setCouponError] = useState(null);
+
   const [checkoutError, setCheckoutError] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [confirmedOrder, setConfirmedOrder] = useState(null);
 
+  // UPI QR Manual Verification state
+  const [upiSession, setUpiSession] = useState(null);
+  const [utrInput, setUtrInput] = useState('');
+  const [utrSubmittedResult, setUtrSubmittedResult] = useState(null);
+  const [upiSecondsLeft, setUpiSecondsLeft] = useState(0);
+
   const isAuthenticated = canCheckout(currentUser);
+  const currency = storeConfig?.currency || 'USD';
+  const upiQrEnabled = Boolean(storeConfig?.paymentMethods?.upiQr && currency === 'INR');
+  const razorpayEnabled = Boolean(storeConfig?.paymentMethods?.razorpay);
+  const stripeEnabled = Boolean(storeConfig?.paymentMethods?.stripe);
 
   useEffect(() => {
     setAddress(shippingAddress);
@@ -59,18 +95,80 @@ export const ShoppingCart = ({
   }, [paymentMethods, selectedCardId]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (resumeUpiOrder && isOpen) {
+      initiateUpiForOrder(resumeUpiOrder);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeUpiOrder, isOpen]);
+
+  useEffect(() => {
+    if (!upiSession?.expiresAt) return undefined;
+    const updateTick = () => {
+      const diff = Math.max(0, Math.floor((new Date(upiSession.expiresAt).getTime() - Date.now()) / 1000));
+      setUpiSecondsLeft(diff);
+    };
+    updateTick();
+    const timer = window.setInterval(updateTick, 1000);
+    return () => window.clearInterval(timer);
+  }, [upiSession]);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
     const onKeyDown = (e) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') handleClose();
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isOpen, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const totals = calculateCartTotals(items, catalog);
-  const progressPct = Math.min(100, Math.round((totals.subtotal / FREE_SHIPPING_THRESHOLD) * 100));
+  const totals = calculateCartTotals(
+    items,
+    catalog,
+    appliedCoupon?.discount || 0,
+    storeConfig
+  );
+  const threshold =
+    storeConfig?.freeShippingThresholdMinor != null
+      ? storeConfig.freeShippingThresholdMinor / 100
+      : FREE_SHIPPING_THRESHOLD;
+  const progressPct = Math.min(100, Math.round((totals.subtotal / threshold) * 100));
+
+  async function initiateUpiForOrder(orderObj) {
+    setCheckoutError(null);
+    setUtrSubmittedResult(null);
+    setIsSubmitting(true);
+    try {
+      const data = await apiFetch('/api/payments/initiate', {
+        method: 'POST',
+        body: JSON.stringify({ orderId: orderObj.id, provider: 'UPI_QR' }),
+      });
+      setConfirmedOrder(orderObj);
+      setUpiSession(data);
+      setStep('upi_qr');
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : 'Unable to start UPI QR payment.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  const handleApplyCoupon = async () => {
+    setCouponError(null);
+    if (!couponInput.trim()) return;
+    try {
+      const data = await apiFetch('/api/coupons/validate', {
+        method: 'POST',
+        body: JSON.stringify({ code: couponInput.trim(), items }),
+      });
+      setAppliedCoupon(data);
+    } catch (err) {
+      setAppliedCoupon(null);
+      setCouponError(err instanceof Error ? err.message : 'Invalid promo code.');
+    }
+  };
 
   const handleProceedToCheckout = () => {
     setCheckoutError(null);
@@ -104,7 +202,7 @@ export const ShoppingCart = ({
     try {
       let paymentMethodIdToUse = selectedCardId;
 
-      if (showNewCard || paymentMethods.length === 0) {
+      if (paymentProvider === 'CARD_TOKEN' && (showNewCard || paymentMethods.length === 0)) {
         const validation = validatePaymentCard({
           cardNumber,
           cardholderName,
@@ -132,11 +230,12 @@ export const ShoppingCart = ({
 
       const order = await onPlaceOrder({
         items,
-        paymentMethodId: paymentMethodIdToUse,
+        paymentMethodId: paymentProvider === 'CARD_TOKEN' ? paymentMethodIdToUse : null,
+        paymentProvider,
+        couponCode: appliedCoupon?.code || null,
         shippingAddress: address,
       });
-      setConfirmedOrder(order);
-      setStep('confirmed');
+
       setShowNewCard(false);
       setCardNumber('');
       setCardholderName('');
@@ -144,6 +243,37 @@ export const ShoppingCart = ({
       setExpYear('');
       setCvc('');
       setBillingZip('');
+      setAppliedCoupon(null);
+      setCouponInput('');
+
+      if (paymentProvider === 'UPI_QR') {
+        await initiateUpiForOrder(order);
+        return;
+      }
+
+      if (paymentProvider === 'STRIPE') {
+        const stripeInit = await apiFetch('/api/payments/initiate', {
+          method: 'POST',
+          body: JSON.stringify({ orderId: order.id, provider: 'STRIPE' }),
+        });
+        if (stripeInit.stripe?.checkoutUrl) {
+          window.location.assign(stripeInit.stripe.checkoutUrl);
+          return;
+        }
+      }
+
+      if (paymentProvider === 'RAZORPAY') {
+        const rzpInit = await apiFetch('/api/payments/initiate', {
+          method: 'POST',
+          body: JSON.stringify({ orderId: order.id, provider: 'RAZORPAY' }),
+        });
+        setConfirmedOrder({ ...order, razorpaySession: rzpInit.razorpay });
+        setStep('confirmed');
+        return;
+      }
+
+      setConfirmedOrder(order);
+      setStep('confirmed');
     } catch (err) {
       setCheckoutError(err instanceof Error ? err.message : 'Unable to process checkout.');
     } finally {
@@ -151,13 +281,51 @@ export const ShoppingCart = ({
     }
   };
 
-  const handleClose = () => {
-    if (step === 'confirmed' || step === 'auth') {
-      setStep('bag');
-      if (step === 'confirmed') setConfirmedOrder(null);
+  const handleSubmitUtr = async (e) => {
+    e.preventDefault();
+    setCheckoutError(null);
+    if (!validateUtrFormat(utrInput)) {
+      setCheckoutError('Enter a valid 10–22 character alphanumeric UTR / UPI reference ID.');
+      return;
     }
+
+    setIsSubmitting(true);
+    try {
+      const result = await apiFetch('/api/payments/upi/submit-utr', {
+        method: 'POST',
+        body: JSON.stringify({
+          orderId: confirmedOrder.id,
+          paymentId: upiSession?.payment?.id,
+          utrNumber: utrInput.trim().toUpperCase(),
+        }),
+      });
+      setUtrSubmittedResult(result);
+      if (result.state && onRefreshState) {
+        onRefreshState(result.state);
+      }
+    } catch (err) {
+      setCheckoutError(err instanceof Error ? err.message : 'Could not submit UTR reference.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleClose = () => {
+    if (step === 'confirmed' || step === 'auth' || step === 'upi_qr') {
+      setStep('bag');
+      if (step === 'confirmed' || step === 'upi_qr') {
+        setConfirmedOrder(null);
+        setUpiSession(null);
+        setUtrInput('');
+        setUtrSubmittedResult(null);
+      }
+    }
+    onClearResumeOrder?.();
     onClose();
   };
+
+  const mins = String(Math.floor(upiSecondsLeft / 60)).padStart(2, '0');
+  const secs = String(upiSecondsLeft % 60).padStart(2, '0');
 
   return (
     <div
@@ -176,6 +344,7 @@ export const ShoppingCart = ({
             {step === 'bag' && `Your Harvest Bag (${totals.itemCount})`}
             {step === 'auth' && 'Account Required to Checkout'}
             {step === 'checkout' && 'Secure Orchard Checkout'}
+            {step === 'upi_qr' && 'UPI QR Payment Verification'}
             {step === 'confirmed' && 'Order Confirmed'}
           </h2>
           <button
@@ -190,7 +359,117 @@ export const ShoppingCart = ({
 
         {/* Drawer Body */}
         <div className="flex-1 overflow-y-auto px-6 py-5">
-          {step === 'confirmed' && confirmedOrder ? (
+          {step === 'upi_qr' && confirmedOrder ? (
+            <div className="py-2 space-y-5">
+              {checkoutError && (
+                <div
+                  role="alert"
+                  className="p-3.5 rounded-md bg-[#9E2A2B]/10 border border-[#9E2A2B]/30 text-xs font-medium text-[#9E2A2B]"
+                >
+                  {checkoutError}
+                </div>
+              )}
+
+              <div className="p-4 rounded-xl border border-[#D8CCB8] bg-[#F6F1E9] space-y-1.5">
+                <div className="flex items-center justify-between text-xs text-[#4B5548]">
+                  <span className="font-mono font-semibold text-[#1C1915]">
+                    Order #{confirmedOrder.orderNumber}
+                  </span>
+                  <span className="inline-flex items-center gap-1 font-mono font-semibold text-[#7A3E1C]">
+                    <Clock className="w-3.5 h-3.5" aria-hidden="true" />
+                    {upiSecondsLeft > 0 ? `Expires ${mins}:${secs}` : 'QR Expired'}
+                  </span>
+                </div>
+                <p className="font-mono tabular-nums text-2xl font-semibold text-[#1B3B2B]">
+                  {formatCurrency(confirmedOrder.total, 'INR')}
+                </p>
+                <p className="text-xs text-[#4B5548]">
+                  Payable to <strong className="text-[#1C1915]">{upiSession?.merchantName}</strong> (
+                  <span className="font-mono">{upiSession?.merchantVpa}</span>)
+                </p>
+              </div>
+
+              {utrSubmittedResult ? (
+                <div className="p-5 rounded-xl border border-[#1B3B2B]/30 bg-[#E6EDE8] space-y-3">
+                  <div className="flex items-center gap-2 font-semibold text-[#1B3B2B]">
+                    <Clock className="w-5 h-5 shrink-0" aria-hidden="true" />
+                    <span>Pending Manual Verification</span>
+                  </div>
+                  <p className="text-xs text-[#1C1915]">
+                    UTR Reference:{' '}
+                    <span className="font-mono font-semibold">
+                      {utrSubmittedResult.payment?.utrNumber}
+                    </span>
+                  </p>
+                  <p className="text-xs text-[#4B5548] font-medium">
+                    Payment verification may take some time. Do not make another payment unless instructed.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleClose();
+                      onTrackNewOrder();
+                    }}
+                    className="w-full min-h-[44px] px-4 py-2 rounded-md bg-[#1B3B2B] text-[#FCFAF6] text-sm font-semibold hover:bg-[#142C20] cursor-pointer"
+                  >
+                    Track Order in Account
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-col items-center p-5 rounded-xl border border-[#D8CCB8] bg-[#FCFAF6] space-y-3">
+                    {upiSession?.qrDataUrl && (
+                      <img
+                        src={upiSession.qrDataUrl}
+                        alt={`UPI QR Code for order ${confirmedOrder.orderNumber}`}
+                        className="w-56 h-56 rounded-lg border border-[#D8CCB8]"
+                      />
+                    )}
+                    <p className="text-xs text-center text-[#4B5548]">
+                      Scan using Google Pay, PhonePe, Paytm, or BHIM and pay the exact INR total.
+                    </p>
+                    {upiSecondsLeft <= 0 && (
+                      <button
+                        type="button"
+                        onClick={() => initiateUpiForOrder(confirmedOrder)}
+                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1B3B2B] hover:underline cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>Generate Fresh QR Code</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <form onSubmit={handleSubmitUtr} className="space-y-3">
+                    <div>
+                      <label htmlFor="upi-utr-input" className="block text-xs font-semibold text-[#1C1915] mb-1">
+                        Enter 12-digit UTR / Transaction Reference ID
+                      </label>
+                      <input
+                        id="upi-utr-input"
+                        type="text"
+                        required
+                        value={utrInput}
+                        onChange={(e) => setUtrInput(e.target.value.toUpperCase())}
+                        placeholder="e.g. 431987654321"
+                        className="w-full min-h-[44px] px-3.5 py-2 rounded-md border border-[#D8CCB8] bg-[#F6F1E9] text-sm font-mono uppercase"
+                      />
+                    </div>
+                    <p className="text-[11px] text-[#7A3E1C] font-medium">
+                      Payment verification may take some time. Do not make another payment unless instructed.
+                    </p>
+                    <button
+                      type="submit"
+                      disabled={isSubmitting || upiSecondsLeft <= 0}
+                      className="w-full min-h-[46px] px-4 py-2.5 rounded-md bg-[#1B3B2B] text-[#FCFAF6] text-sm font-semibold hover:bg-[#142C20] disabled:opacity-60 cursor-pointer"
+                    >
+                      {isSubmitting ? 'Submitting Reference...' : 'Submit UTR for Verification'}
+                    </button>
+                  </form>
+                </>
+              )}
+            </div>
+          ) : step === 'confirmed' && confirmedOrder ? (
             <div className="py-6 space-y-6">
               <div className="p-5 rounded-xl bg-[#E6EDE8] border border-[#1B3B2B]/30 text-[#1B3B2B]">
                 <div className="flex items-center gap-2.5 font-semibold text-base">
@@ -211,13 +490,13 @@ export const ShoppingCart = ({
                   </dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-[#4B5548]">Payment Processed</dt>
+                  <dt className="text-[#4B5548]">Payment Status</dt>
                   <dd className="font-medium text-[#1C1915]">{confirmedOrder.paymentSummary}</dd>
                 </div>
                 <div className="flex justify-between">
-                  <dt className="text-[#4B5548]">Total Charged</dt>
+                  <dt className="text-[#4B5548]">Total</dt>
                   <dd className="font-mono tabular-nums font-semibold text-[#1C1915]">
-                    {formatCurrency(confirmedOrder.total)}
+                    {formatCurrency(confirmedOrder.total, confirmedOrder.currency || currency)}
                   </dd>
                 </div>
               </dl>
@@ -265,7 +544,7 @@ export const ShoppingCart = ({
                 <p className="text-xs font-medium text-[#1C1915]">
                   {totals.shippingFee === 0
                     ? 'Free carbon-neutral orchard shipping unlocked!'
-                    : `Add ${formatCurrency(totals.freeShippingRemaining)} more for free shipping.`}
+                    : `Add ${formatCurrency(totals.freeShippingRemaining, currency)} more for free shipping.`}
                 </p>
                 <div className="mt-2 h-1.5 w-full rounded-full bg-[#D8CCB8] overflow-hidden">
                   <div
@@ -275,12 +554,45 @@ export const ShoppingCart = ({
                 </div>
               </div>
 
+              {/* Promo Code Input */}
+              <div className="p-3.5 rounded-lg bg-[#F6F1E9] border border-[#D8CCB8] space-y-2">
+                <label htmlFor="cart-coupon-input" className="block text-xs font-semibold text-[#1C1915]">
+                  Promo Code (e.g. HARVEST10)
+                </label>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Tag className="w-3.5 h-3.5 text-[#4B5548] absolute left-3 top-1/2 -translate-y-1/2" aria-hidden="true" />
+                    <input
+                      id="cart-coupon-input"
+                      type="text"
+                      value={couponInput}
+                      onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                      placeholder="Enter code"
+                      className="w-full min-h-[38px] pl-8 pr-3 py-1.5 rounded border border-[#D8CCB8] bg-[#FCFAF6] text-xs font-mono uppercase"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleApplyCoupon}
+                    className="min-h-[38px] px-3.5 py-1.5 rounded bg-[#1B3B2B] text-[#FCFAF6] text-xs font-semibold hover:bg-[#142C20] cursor-pointer"
+                  >
+                    Apply
+                  </button>
+                </div>
+                {appliedCoupon && (
+                  <p className="text-xs text-[#1B3B2B] font-medium">
+                    Applied {appliedCoupon.code}: −{formatCurrency(appliedCoupon.discount, currency)}
+                  </p>
+                )}
+                {couponError && <p className="text-xs text-[#9E2A2B]">{couponError}</p>}
+              </div>
+
               {/* Cart Items */}
               <ul className="divide-y divide-[#EBE2D3]">
                 {items.map((item) => {
                   const product = catalog.find((p) => p.id === item.productId);
                   if (!product) return null;
-                  const unitPrice = calculateUnitPrice(product.basePrice16oz, item.weightSize);
+                  const unitPrice = calculateUnitPrice(product.basePrice16oz, item.weightSize, product);
 
                   return (
                     <li
@@ -300,13 +612,13 @@ export const ShoppingCart = ({
                               {product.name}
                             </p>
                             <span className="font-mono tabular-nums text-sm font-semibold text-[#1C1915] shrink-0">
-                              {formatCurrency(unitPrice * item.quantity)}
+                              {formatCurrency(unitPrice * item.quantity, currency)}
                             </span>
                           </div>
                           <p className="text-xs text-[#4B5548] mt-0.5">
                             {WEIGHT_OPTIONS[item.weightSize].label} ·{' '}
                             <span className="font-mono tabular-nums">
-                              {formatCurrency(unitPrice)}
+                              {formatCurrency(unitPrice, currency)}
                             </span>{' '}
                             each
                           </p>
@@ -383,7 +695,6 @@ export const ShoppingCart = ({
               </button>
             </div>
           ) : (
-            /* Checkout Form (Authenticated Users Only) */
             <form id="checkout-form" onSubmit={handleCheckoutSubmit} noValidate className="space-y-6">
               {checkoutError && (
                 <div
@@ -391,6 +702,30 @@ export const ShoppingCart = ({
                   className="p-3.5 rounded-md bg-[#9E2A2B]/10 border border-[#9E2A2B]/30 text-xs font-medium text-[#9E2A2B]"
                 >
                   {checkoutError}
+                </div>
+              )}
+
+              {/* Saved Address Selector */}
+              {addresses.length > 0 && (
+                <div>
+                  <label htmlFor="chk-saved-addr" className="block text-xs font-semibold text-[#1C1915] mb-1">
+                    Saved Delivery Addresses
+                  </label>
+                  <select
+                    id="chk-saved-addr"
+                    value={address.id || ''}
+                    onChange={(e) => {
+                      const picked = addresses.find((a) => a.id === e.target.value);
+                      if (picked) setAddress(picked);
+                    }}
+                    className="w-full min-h-[40px] px-3 py-1.5 rounded-md border border-[#D8CCB8] bg-[#F6F1E9] text-sm"
+                  >
+                    {addresses.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.label || 'Address'}: {a.fullName} — {a.street}, {a.city}
+                      </option>
+                    ))}
+                  </select>
                 </div>
               )}
 
@@ -458,7 +793,7 @@ export const ShoppingCart = ({
                   </div>
                   <div>
                     <label htmlFor="chk-zip" className="block text-xs font-semibold text-[#1C1915] mb-1">
-                      ZIP
+                      ZIP / Postal
                     </label>
                     <input
                       id="chk-zip"
@@ -480,11 +815,10 @@ export const ShoppingCart = ({
                 </legend>
 
                 <div className="space-y-2">
-                  {paymentMethods.map((card) => (
+                  {upiQrEnabled && (
                     <label
-                      key={card.id}
                       className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer ${
-                        !showNewCard && selectedCardId === card.id
+                        paymentProvider === 'UPI_QR'
                           ? 'border-[#1B3B2B] bg-[#E6EDE8]'
                           : 'border-[#D8CCB8] bg-[#F6F1E9]'
                       }`}
@@ -492,9 +826,80 @@ export const ShoppingCart = ({
                       <span className="flex items-center gap-2.5 text-sm font-medium text-[#1C1915]">
                         <input
                           type="radio"
-                          name="checkoutCard"
-                          checked={!showNewCard && selectedCardId === card.id}
+                          name="paymentProvider"
+                          checked={paymentProvider === 'UPI_QR'}
+                          onChange={() => setPaymentProvider('UPI_QR')}
+                          className="w-4 h-4 accent-[#1B3B2B]"
+                        />
+                        <QrCode className="w-4 h-4 text-[#1B3B2B]" aria-hidden="true" />
+                        <span>UPI QR Code (Manual Verification)</span>
+                      </span>
+                      <span className="text-[11px] font-mono text-[#7A3E1C]">INR Only</span>
+                    </label>
+                  )}
+
+                  {razorpayEnabled && (
+                    <label
+                      className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer ${
+                        paymentProvider === 'RAZORPAY'
+                          ? 'border-[#1B3B2B] bg-[#E6EDE8]'
+                          : 'border-[#D8CCB8] bg-[#F6F1E9]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 text-sm font-medium text-[#1C1915]">
+                        <input
+                          type="radio"
+                          name="paymentProvider"
+                          checked={paymentProvider === 'RAZORPAY'}
+                          onChange={() => setPaymentProvider('RAZORPAY')}
+                          className="w-4 h-4 accent-[#1B3B2B]"
+                        />
+                        <CreditCard className="w-4 h-4 text-[#1B3B2B]" aria-hidden="true" />
+                        <span>Razorpay (UPI / Cards / NetBanking)</span>
+                      </span>
+                    </label>
+                  )}
+
+                  {stripeEnabled && (
+                    <label
+                      className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer ${
+                        paymentProvider === 'STRIPE'
+                          ? 'border-[#1B3B2B] bg-[#E6EDE8]'
+                          : 'border-[#D8CCB8] bg-[#F6F1E9]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 text-sm font-medium text-[#1C1915]">
+                        <input
+                          type="radio"
+                          name="paymentProvider"
+                          checked={paymentProvider === 'STRIPE'}
+                          onChange={() => setPaymentProvider('STRIPE')}
+                          className="w-4 h-4 accent-[#1B3B2B]"
+                        />
+                        <CreditCard className="w-4 h-4 text-[#1B3B2B]" aria-hidden="true" />
+                        <span>Stripe Hosted Checkout</span>
+                      </span>
+                    </label>
+                  )}
+
+                  {paymentMethods.map((card) => (
+                    <label
+                      key={card.id}
+                      className={`flex items-center justify-between p-3 rounded-lg border cursor-pointer ${
+                        paymentProvider === 'CARD_TOKEN' && !showNewCard && selectedCardId === card.id
+                          ? 'border-[#1B3B2B] bg-[#E6EDE8]'
+                          : 'border-[#D8CCB8] bg-[#F6F1E9]'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 text-sm font-medium text-[#1C1915]">
+                        <input
+                          type="radio"
+                          name="paymentProvider"
+                          checked={
+                            paymentProvider === 'CARD_TOKEN' && !showNewCard && selectedCardId === card.id
+                          }
                           onChange={() => {
+                            setPaymentProvider('CARD_TOKEN');
                             setShowNewCard(false);
                             setSelectedCardId(card.id);
                           }}
@@ -513,23 +918,28 @@ export const ShoppingCart = ({
 
                   <label
                     className={`flex items-center gap-2.5 p-3 rounded-lg border cursor-pointer text-sm font-medium ${
-                      showNewCard || paymentMethods.length === 0
+                      paymentProvider === 'CARD_TOKEN' && (showNewCard || paymentMethods.length === 0)
                         ? 'border-[#1B3B2B] bg-[#E6EDE8] text-[#1B3B2B]'
                         : 'border-[#D8CCB8] bg-[#F6F1E9] text-[#1C1915]'
                     }`}
                   >
                     <input
                       type="radio"
-                      name="checkoutCard"
-                      checked={showNewCard || paymentMethods.length === 0}
-                      onChange={() => setShowNewCard(true)}
+                      name="paymentProvider"
+                      checked={
+                        paymentProvider === 'CARD_TOKEN' && (showNewCard || paymentMethods.length === 0)
+                      }
+                      onChange={() => {
+                        setPaymentProvider('CARD_TOKEN');
+                        setShowNewCard(true);
+                      }}
                       className="w-4 h-4 accent-[#1B3B2B]"
                     />
                     <span>Use a new credit or debit card</span>
                   </label>
                 </div>
 
-                {(showNewCard || paymentMethods.length === 0) && (
+                {paymentProvider === 'CARD_TOKEN' && (showNewCard || paymentMethods.length === 0) && (
                   <div className="p-4 rounded-lg bg-[#F6F1E9] border border-[#D8CCB8] space-y-3">
                     <div>
                       <label htmlFor="chk-card-name" className="block text-xs font-semibold mb-1">
@@ -637,22 +1047,28 @@ export const ShoppingCart = ({
         </div>
 
         {/* Drawer Footer Totals & Actions */}
-        {step !== 'confirmed' && step !== 'auth' && items.length > 0 && (
+        {step !== 'confirmed' && step !== 'auth' && step !== 'upi_qr' && items.length > 0 && (
           <div className="px-6 py-5 border-t border-[#D8CCB8] bg-[#F6F1E9] space-y-4">
             <dl className="space-y-1.5 text-sm">
               <div className="flex justify-between text-[#4B5548]">
                 <dt>Subtotal</dt>
-                <dd className="font-mono tabular-nums">{formatCurrency(totals.subtotal)}</dd>
+                <dd className="font-mono tabular-nums">{formatCurrency(totals.subtotal, currency)}</dd>
               </div>
+              {totals.discount > 0 && (
+                <div className="flex justify-between text-[#1B3B2B] font-medium">
+                  <dt>Discount ({appliedCoupon?.code})</dt>
+                  <dd className="font-mono tabular-nums">−{formatCurrency(totals.discount, currency)}</dd>
+                </div>
+              )}
               <div className="flex justify-between text-[#4B5548]">
                 <dt>Shipping</dt>
                 <dd className="font-mono tabular-nums">
-                  {totals.shippingFee === 0 ? 'Free' : formatCurrency(totals.shippingFee)}
+                  {totals.shippingFee === 0 ? 'Free' : formatCurrency(totals.shippingFee, currency)}
                 </dd>
               </div>
               <div className="pt-2 border-t border-[#D8CCB8] flex justify-between items-baseline font-semibold text-[#1C1915]">
                 <dt>Total</dt>
-                <dd className="font-mono tabular-nums text-lg">{formatCurrency(totals.total)}</dd>
+                <dd className="font-mono tabular-nums text-lg">{formatCurrency(totals.total, currency)}</dd>
               </div>
             </dl>
 
@@ -683,7 +1099,9 @@ export const ShoppingCart = ({
                   <span>
                     {isSubmitting
                       ? 'Processing...'
-                      : `Complete Order · ${formatCurrency(totals.total)}`}
+                      : paymentProvider === 'UPI_QR'
+                        ? `Pay via UPI QR · ${formatCurrency(totals.total, currency)}`
+                        : `Complete Order · ${formatCurrency(totals.total, currency)}`}
                   </span>
                 </button>
               </div>

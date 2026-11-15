@@ -4,20 +4,45 @@ import {
   WEIGHT_OPTIONS,
 } from '../data/catalog.js';
 
+const CURRENCY_SYMBOLS = {
+  USD: '$',
+  INR: '₹',
+  EUR: '€',
+  GBP: '£',
+};
+
 export function roundCurrency(value) {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+  return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
 }
 
-export function formatCurrency(value) {
-  return `$${roundCurrency(value).toFixed(2)}`;
+export function formatCurrency(value, currency = 'USD') {
+  const code = String(currency || 'USD').toUpperCase();
+  const sym = CURRENCY_SYMBOLS[code] || `${code} `;
+  return `${sym}${roundCurrency(value).toFixed(2)}`;
 }
 
-export function calculateUnitPrice(basePrice16oz, weightSize) {
+export function getVariantForProduct(product, weightSize = '16oz') {
+  if (!product || !Array.isArray(product.variants)) return null;
+  return product.variants.find((v) => v.weightSize === weightSize) || product.variants[0] || null;
+}
+
+export function getVariantAvailableStock(product, weightSize = '16oz') {
+  const v = getVariantForProduct(product, weightSize);
+  if (!v) return product?.inStock === false ? 0 : 99;
+  if (v.availableStock != null) return Math.max(0, Number(v.availableStock));
+  return Math.max(0, Number(v.stockQuantity || 0) - Number(v.reservedStock || 0));
+}
+
+export function calculateUnitPrice(basePrice16oz, weightSize, product = null) {
+  const variant = product ? getVariantForProduct(product, weightSize) : null;
+  if (variant && variant.price != null) {
+    return roundCurrency(variant.price);
+  }
   const multiplier = WEIGHT_OPTIONS[weightSize]?.priceMultiplier ?? 1;
   return roundCurrency(basePrice16oz * multiplier);
 }
 
-export function calculateCartTotals(items, catalog) {
+export function calculateCartTotals(items, catalog, discountAmount = 0, storeConfig = null) {
   let itemCount = 0;
   let subtotal = 0;
 
@@ -25,23 +50,35 @@ export function calculateCartTotals(items, catalog) {
     const product = catalog.find((p) => p.id === item.productId);
     if (!product || item.quantity <= 0) continue;
 
-    const activeUnit = calculateUnitPrice(product.basePrice16oz, item.weightSize);
+    const activeUnit = calculateUnitPrice(product.basePrice16oz, item.weightSize, product);
     itemCount += item.quantity;
     subtotal += activeUnit * item.quantity;
   }
 
   subtotal = roundCurrency(subtotal);
-  const qualifiesForFreeShipping = subtotal >= FREE_SHIPPING_THRESHOLD;
-  const shippingFee = itemCount === 0 ? 0 : qualifiesForFreeShipping ? 0 : STANDARD_SHIPPING_FEE;
+  const threshold =
+    storeConfig?.freeShippingThresholdMinor != null
+      ? storeConfig.freeShippingThresholdMinor / 100
+      : FREE_SHIPPING_THRESHOLD;
+  const standardFee =
+    storeConfig?.standardShippingFeeMinor != null
+      ? storeConfig.standardShippingFeeMinor / 100
+      : STANDARD_SHIPPING_FEE;
+
+  const discount = roundCurrency(Math.min(subtotal, Math.max(0, Number(discountAmount || 0))));
+  const discountedSubtotal = roundCurrency(Math.max(0, subtotal - discount));
+  const qualifiesForFreeShipping = discountedSubtotal >= threshold;
+  const shippingFee = itemCount === 0 ? 0 : qualifiesForFreeShipping ? 0 : standardFee;
   const freeShippingRemaining =
     qualifiesForFreeShipping || itemCount === 0
       ? 0
-      : roundCurrency(Math.max(0, FREE_SHIPPING_THRESHOLD - subtotal));
-  const total = roundCurrency(subtotal + shippingFee);
+      : roundCurrency(Math.max(0, threshold - discountedSubtotal));
+  const total = roundCurrency(discountedSubtotal + shippingFee);
 
   return {
     itemCount,
     subtotal,
+    discount,
     shippingFee,
     freeShippingRemaining,
     total,
@@ -62,21 +99,19 @@ export function formatReadableDate(dateInput) {
   }).format(date);
 }
 
-export function getPersonalizedRecommendations(
-  catalog,
-  preferences,
-  orders,
-  limit = 3
-) {
+export function getPersonalizedRecommendations(catalog, preferences, orders, limit = 3) {
   const orderedIds = new Set(
-    orders.flatMap((order) => order.items.map((item) => item.productId))
+    (orders || []).flatMap((order) => (order.items || []).map((item) => item.productId))
   );
+  const excluded = preferences?.excludedAllergens || [];
+  const goals = preferences?.dietaryGoals || [];
+  const preferredRoast = preferences?.preferredRoast || 'raw_sprouted';
 
   const scored = [];
 
   for (const product of catalog) {
-    const hasExcludedAllergen = product.allergens.some((allergen) =>
-      preferences.excludedAllergens.includes(allergen)
+    const hasExcludedAllergen = (product.allergens || []).some((allergen) =>
+      excluded.includes(allergen)
     );
     if (hasExcludedAllergen || !product.inStock) {
       continue;
@@ -85,14 +120,12 @@ export function getPersonalizedRecommendations(
     let score = 0;
     const reasons = [];
 
-    if (product.roastProfile === preferences.preferredRoast) {
+    if (product.roastProfile === preferredRoast) {
       score += 35;
       reasons.push(`Matches your ${product.roastLabel.toLowerCase()} roast preference`);
     }
 
-    const matchingGoals = product.dietaryTags.filter((tag) =>
-      preferences.dietaryGoals.includes(tag)
-    );
+    const matchingGoals = (product.dietaryTags || []).filter((tag) => goals.includes(tag));
     if (matchingGoals.length > 0) {
       score += matchingGoals.length * 22;
       const goalLabels = {
@@ -132,11 +165,21 @@ export function calculateAdminOrderMetrics(orders) {
   let awaitingPacking = 0;
   let inTransit = 0;
   let delivered = 0;
+  let awaitingPayment = 0;
   let revenue = 0;
 
   for (const order of orders) {
     if (order.status === 'cancelled') continue;
-    revenue += Number(order.total) || 0;
+
+    if (order.status === 'awaiting_payment' || order.paymentStatus === 'PENDING' || order.paymentStatus === 'PENDING_MANUAL_VERIFICATION') {
+      awaitingPayment += 1;
+    }
+
+    // Verified revenue only counts orders whose payment is CAPTURED (or legacy orders without paymentStatus field)
+    const isPaid = !order.paymentStatus || order.paymentStatus === 'CAPTURED';
+    if (isPaid) {
+      revenue += Number(order.total) || 0;
+    }
 
     if (order.isLive === false) {
       draftCount += 1;
@@ -156,6 +199,7 @@ export function calculateAdminOrderMetrics(orders) {
     awaitingPacking,
     inTransit,
     delivered,
+    awaitingPayment,
     revenue: roundCurrency(revenue),
   };
 }
@@ -169,7 +213,7 @@ export function filterAdminOrders(orders, statusFilter, liveFilter, query) {
     if (q) {
       const hay = `${order.orderNumber} ${order.trackingNumber} ${
         order.shippingAddress?.fullName || ''
-      } ${order.shippingAddress?.city || ''} ${order.items
+      } ${order.shippingAddress?.city || ''} ${(order.items || [])
         .map((i) => i.productName)
         .join(' ')}`.toLowerCase();
       if (!hay.includes(q)) return false;
@@ -239,6 +283,11 @@ export function validatePaymentCard(input, referenceYear = 2026, referenceMonth 
     valid: Object.keys(errors).length === 0,
     errors,
   };
+}
+
+export function validateUtrFormat(rawUtr) {
+  const normalized = String(rawUtr || '').trim().toUpperCase();
+  return /^[A-Z0-9]{10,22}$/.test(normalized);
 }
 
 export function addCartItem(items, productId, weightSize, qty = 1) {

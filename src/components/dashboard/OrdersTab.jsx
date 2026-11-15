@@ -1,5 +1,18 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, ChevronUp, PackageCheck, RotateCcw, Search, Star, Truck, XCircle } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  FileDown,
+  PackageCheck,
+  QrCode,
+  RotateCcw,
+  Search,
+  Star,
+  Truck,
+  XCircle,
+} from 'lucide-react';
+import { apiFetch } from '../../services/api.js';
 import { formatCurrency, formatReadableDate } from '../../utils/commerce.js';
 
 const STEPS = [
@@ -15,6 +28,8 @@ function getStepIndex(status) {
 
 function getStatusText(status) {
   switch (status) {
+    case 'awaiting_payment':
+      return 'Awaiting Payment';
     case 'placed':
       return 'Order Placed';
     case 'packed':
@@ -30,11 +45,41 @@ function getStatusText(status) {
   }
 }
 
-export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
+function getPaymentBadge(paymentStatus) {
+  switch (String(paymentStatus || '').toUpperCase()) {
+    case 'CAPTURED':
+      return { text: 'Verified Paid', cls: 'bg-[#E6EDE8] text-[#1B3B2B] border-[#1B3B2B]/30' };
+    case 'PENDING_MANUAL_VERIFICATION':
+      return { text: 'Pending Verification', cls: 'bg-[#7A3E1C]/10 text-[#7A3E1C] border-[#7A3E1C]/30' };
+    case 'REJECTED':
+    case 'FAILED':
+      return { text: 'Payment Action Needed', cls: 'bg-[#9E2A2B]/10 text-[#9E2A2B] border-[#9E2A2B]/30' };
+    case 'REFUNDED':
+    case 'PARTIALLY_REFUNDED':
+      return { text: 'Refunded', cls: 'bg-[#EBE2D3] text-[#4B5548] border-[#D8CCB8]' };
+    case 'PENDING':
+      return { text: 'Payment Pending', cls: 'bg-[#F6F1E9] text-[#7A3E1C] border-[#D8CCB8]' };
+    default:
+      return null;
+  }
+}
+
+export const OrdersTab = ({
+  orders,
+  returnRequests = [],
+  onReorderOrder,
+  onReviewProduct,
+  onPayOrderUpi,
+  onRefreshState,
+}) => {
   const [filterStatus, setFilterStatus] = useState('all');
   const [query, setQuery] = useState('');
   const liveOrders = useMemo(() => orders.filter((o) => o.isLive !== false), [orders]);
   const [expandedOrderId, setExpandedOrderId] = useState(liveOrders[0]?.id ?? null);
+  const [returnOrderId, setReturnOrderId] = useState(null);
+  const [returnReason, setReturnReason] = useState('');
+  const [returnError, setReturnError] = useState(null);
+  const [returnSubmitting, setReturnSubmitting] = useState(false);
 
   const filteredOrders = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -50,6 +95,31 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
     });
   }, [liveOrders, filterStatus, query]);
 
+  const handleRequestReturn = async (e, orderId) => {
+    e.preventDefault();
+    setReturnError(null);
+    if (returnReason.trim().length < 8) {
+      setReturnError('Please describe the reason for return or refund (min 8 characters).');
+      return;
+    }
+    setReturnSubmitting(true);
+    try {
+      const res = await apiFetch(`/api/orders/${encodeURIComponent(orderId)}/returns`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: returnReason.trim() }),
+      });
+      if (res.state && onRefreshState) {
+        onRefreshState(res.state);
+      }
+      setReturnOrderId(null);
+      setReturnReason('');
+    } catch (err) {
+      setReturnError(err instanceof Error ? err.message : 'Unable to submit return request.');
+    } finally {
+      setReturnSubmitting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Filter & Search Bar */}
@@ -57,6 +127,7 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
         <div role="group" aria-label="Filter order history" className="flex flex-wrap gap-2">
           {[
             { id: 'all', label: 'All Orders' },
+            { id: 'awaiting_payment', label: 'Awaiting Payment' },
             { id: 'placed', label: 'Placed' },
             { id: 'packed', label: 'Packed' },
             { id: 'in_transit', label: 'In Transit' },
@@ -110,6 +181,14 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
           {filteredOrders.map((order) => {
             const isExpanded = expandedOrderId === order.id;
             const currentStep = getStepIndex(order.status);
+            const paymentBadge = getPaymentBadge(order.paymentStatus);
+            const orderCurrency = order.currency || 'USD';
+            const existingReturn = returnRequests.find((r) => r.orderId === order.id);
+            const canRetryUpi =
+              order.currency === 'INR' &&
+              (order.paymentStatus === 'PENDING' || order.paymentStatus === 'REJECTED') &&
+              order.status !== 'cancelled' &&
+              onPayOrderUpi;
 
             return (
               <article
@@ -130,18 +209,32 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
                       <span aria-hidden="true">·</span>
                       <span
                         className={`inline-flex items-center gap-1 font-semibold ${
-                          order.status === 'cancelled' ? 'text-[#9E2A2B]' : 'text-[#1B3B2B]'
+                          order.status === 'cancelled'
+                            ? 'text-[#9E2A2B]'
+                            : order.status === 'awaiting_payment'
+                              ? 'text-[#7A3E1C]'
+                              : 'text-[#1B3B2B]'
                         }`}
                       >
                         {order.status === 'delivered' ? (
                           <PackageCheck className="w-3.5 h-3.5" aria-hidden="true" />
                         ) : order.status === 'cancelled' ? (
                           <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
+                        ) : order.status === 'awaiting_payment' ? (
+                          <Clock className="w-3.5 h-3.5" aria-hidden="true" />
                         ) : (
                           <Truck className="w-3.5 h-3.5" aria-hidden="true" />
                         )}
                         <span>{getStatusText(order.status)}</span>
                       </span>
+
+                      {paymentBadge && (
+                        <span
+                          className={`px-2 py-0.5 rounded border text-[11px] font-semibold ${paymentBadge.cls}`}
+                        >
+                          {paymentBadge.text}
+                        </span>
+                      )}
                     </div>
 
                     <p className="font-display text-lg font-semibold text-[#1C1915]">
@@ -156,10 +249,21 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
                     </p>
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-3 shrink-0">
+                  <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 shrink-0">
                     <span className="font-mono tabular-nums text-lg font-semibold text-[#1C1915]">
-                      {formatCurrency(order.total)}
+                      {formatCurrency(order.total, orderCurrency)}
                     </span>
+
+                    {canRetryUpi && (
+                      <button
+                        type="button"
+                        onClick={() => onPayOrderUpi(order)}
+                        className="min-h-[40px] px-3 py-2 rounded-md bg-[#7A3E1C] text-[#FCFAF6] text-xs font-semibold inline-flex items-center gap-1.5 hover:bg-[#5f2f14] cursor-pointer"
+                      >
+                        <QrCode className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>Pay / Submit UTR</span>
+                      </button>
+                    )}
 
                     <button
                       type="button"
@@ -190,11 +294,26 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
                 {/* Expanded Tracking Timeline & Itemized Receipt */}
                 {isExpanded && (
                   <div className="px-5 sm:px-6 pb-6 pt-4 border-t border-[#EBE2D3] bg-[#F6F1E9]/50 space-y-6">
-                    {/* 4-Stage Tracking Stepper */}
                     {order.status === 'cancelled' ? (
                       <p className="text-sm font-medium text-[#9E2A2B]">
                         This order has been cancelled by orchard fulfillment.
                       </p>
+                    ) : order.status === 'awaiting_payment' ? (
+                      <div className="p-4 rounded-lg border border-[#7A3E1C]/30 bg-[#FCFAF6] text-xs text-[#1C1915] space-y-1">
+                        <p className="font-semibold text-[#7A3E1C]">
+                          {order.paymentStatus === 'PENDING_MANUAL_VERIFICATION'
+                            ? 'UTR Reference Submitted — Pending Verification'
+                            : order.paymentStatus === 'REJECTED'
+                              ? 'Previous Payment Attempt Rejected'
+                              : 'Awaiting Payment Confirmation'}
+                        </p>
+                        <p className="text-[#4B5548]">
+                          {order.paymentStatus === 'PENDING_MANUAL_VERIFICATION'
+                            ? 'Payment verification may take some time. Do not make another payment unless instructed.'
+                            : order.latestPayment?.rejectionReason ||
+                              'Complete payment or submit your UPI transaction reference to move into cold-shell fulfillment.'}
+                        </p>
+                      </div>
                     ) : (
                       <div>
                         <p className="text-xs font-semibold text-[#1C1915] mb-3">
@@ -254,7 +373,7 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
                                   </button>
                                 )}
                                 <span className="font-mono tabular-nums font-semibold text-[#1C1915]">
-                                  {formatCurrency(item.unitPrice * item.quantity)}
+                                  {formatCurrency(item.unitPrice * item.quantity, orderCurrency)}
                                 </span>
                               </div>
                             </li>
@@ -269,9 +388,76 @@ export const OrdersTab = ({ orders, onReorderOrder, onReviewProduct }) => {
                           {order.shippingAddress.street}, {order.shippingAddress.city},{' '}
                           {order.shippingAddress.state} {order.shippingAddress.postalCode}
                         </p>
-                        <p className="pt-2">Paid via {order.paymentSummary}</p>
+                        <p className="pt-2">Method: {order.paymentSummary}</p>
+
+                        <div className="pt-3 flex flex-wrap gap-2">
+                          <a
+                            href={`/api/orders/${encodeURIComponent(order.id)}/invoice.pdf`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-[#D8CCB8] bg-[#FCFAF6] text-xs font-semibold text-[#1B3B2B] hover:bg-[#EBE2D3]"
+                          >
+                            <FileDown className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>Invoice PDF</span>
+                          </a>
+
+                          {order.paymentStatus === 'CAPTURED' && !existingReturn && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReturnOrderId(returnOrderId === order.id ? null : order.id);
+                                setReturnError(null);
+                              }}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-[#D8CCB8] bg-[#FCFAF6] text-xs font-medium text-[#7A3E1C] hover:bg-[#EBE2D3] cursor-pointer"
+                            >
+                              Request Return
+                            </button>
+                          )}
+                        </div>
+
+                        {existingReturn && (
+                          <p className="text-xs font-medium text-[#7A3E1C] pt-1">
+                            Return Request: {existingReturn.status}
+                          </p>
+                        )}
                       </div>
                     </div>
+
+                    {returnOrderId === order.id && (
+                      <form
+                        onSubmit={(e) => handleRequestReturn(e, order.id)}
+                        className="p-4 rounded-lg border border-[#D8CCB8] bg-[#FCFAF6] space-y-3"
+                      >
+                        <label htmlFor={`ret-${order.id}`} className="block text-xs font-semibold text-[#1C1915]">
+                          Return or Refund Reason
+                        </label>
+                        {returnError && <p className="text-xs text-[#9E2A2B]">{returnError}</p>}
+                        <textarea
+                          id={`ret-${order.id}`}
+                          rows={2}
+                          value={returnReason}
+                          onChange={(e) => setReturnReason(e.target.value)}
+                          placeholder="Describe the issue with freshness, packaging, or item count..."
+                          className="w-full px-3 py-2 rounded border border-[#D8CCB8] bg-[#F6F1E9] text-xs"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            type="submit"
+                            disabled={returnSubmitting}
+                            className="px-4 py-1.5 rounded bg-[#1B3B2B] text-[#FCFAF6] text-xs font-semibold cursor-pointer"
+                          >
+                            {returnSubmitting ? 'Submitting...' : 'Submit Return Request'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setReturnOrderId(null)}
+                            className="px-3 py-1.5 rounded border border-[#D8CCB8] text-xs cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </form>
+                    )}
                   </div>
                 )}
               </article>
