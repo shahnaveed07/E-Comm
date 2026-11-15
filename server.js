@@ -316,13 +316,25 @@ function buildOrderLineItems(items, catalog) {
   return { orderItems, subtotal, shippingFee, total };
 }
 
-function setSessionCookie(res, token) {
-  res.cookie(SESSION_COOKIE_NAME, token, {
+function getSessionCookieOptions(req) {
+  const isHttps =
+    Boolean(req?.secure) ||
+    String(req?.headers?.['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase() === 'https';
+
+  return {
     httpOnly: true,
-    sameSite: 'lax',
+    sameSite: isHttps ? 'none' : 'lax',
+    secure: isHttps,
     path: '/',
     maxAge: SESSION_MAX_AGE_MS,
-  });
+  };
+}
+
+function setSessionCookie(req, res, token) {
+  res.cookie(SESSION_COOKIE_NAME, token, getSessionCookieOptions(req));
 }
 
 async function startServer() {
@@ -429,7 +441,7 @@ async function startServer() {
     saveStore(state);
 
     const token = signSessionToken(newUser.id, newUser.role);
-    setSessionCookie(res, token);
+    setSessionCookie(req, res, token);
     res.status(201).json({
       user: sanitizeUser(newUser),
       state: buildClientState(state, newUser),
@@ -447,15 +459,20 @@ async function startServer() {
     }
 
     const token = signSessionToken(user.id, user.role);
-    setSessionCookie(res, token);
+    setSessionCookie(req, res, token);
     res.json({
       user: sanitizeUser(user),
       state: buildClientState(state, user),
     });
   });
 
-  app.post('/api/auth/logout', (_req, res) => {
-    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+  app.post('/api/auth/logout', (req, res) => {
+    const cookieOpts = getSessionCookieOptions(req);
+    res.clearCookie(SESSION_COOKIE_NAME, {
+      path: '/',
+      sameSite: cookieOpts.sameSite,
+      secure: cookieOpts.secure,
+    });
     res.json({ user: null, state: buildClientState(state, null) });
   });
 
@@ -905,6 +922,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
+    app.use('/src/assets/images', express.static(path.join(process.cwd(), 'src', 'assets', 'images')));
     app.use(express.static(path.join(process.cwd(), 'dist')));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(process.cwd(), 'dist', 'index.html'));
