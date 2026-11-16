@@ -4,6 +4,7 @@ import { calculateUnitPrice, formatCurrency } from '../utils/commerce.js';
 export const RecommendationsSection = ({
   recommendations,
   preferredRoastLabel,
+  currency = 'USD',
   onAddToCart,
   onSelectProduct,
   onOpenPreferences,
@@ -57,7 +58,7 @@ export const RecommendationsSection = ({
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {recommendations.map(({ product, matchReason }) => {
-              const price16oz = calculateUnitPrice(product.basePrice16oz, '16oz');
+              const price16oz = calculateUnitPrice(product.basePrice16oz, '16oz', product);
               return (
                 <article
                   key={product.id}
@@ -79,7 +80,7 @@ export const RecommendationsSection = ({
                           {product.name}
                         </h3>
                         <p className="font-mono tabular-nums text-sm font-semibold text-[#1B3B2B] mt-1">
-                          {formatCurrency(price16oz)}{' '}
+                          {formatCurrency(price16oz, product.currency || currency)}{' '}
                           <span className="font-sans font-normal text-xs text-[#4B5548]">
                             / 16 oz bag
                           </span>

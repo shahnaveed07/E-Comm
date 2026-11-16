@@ -1,4 +1,5 @@
 import { WEIGHT_OPTIONS } from '../../../src/data/catalog.js';
+import { isUpiQrAvailable } from '../../config/env.js';
 import { AppError } from '../../middleware/errorHandler.js';
 import { calculateCouponDiscountMinor, calculateOrderTotalsMinor } from '../../utils/money.js';
 
@@ -146,6 +147,13 @@ export function createOrderService({ repo, config, emailService, broadcastEvent 
         commitStock = true;
         reserveStock = false;
       } else if (providerNorm === 'UPI_QR') {
+        if (!isUpiQrAvailable(config, currency)) {
+          throw new AppError(
+            400,
+            'UPI QR payment is only available when store currency is INR and UPI_QR_ENABLED=true.',
+            'UPI_QR_UNAVAILABLE'
+          );
+        }
         paymentSummary = 'UPI QR (Pending Verification)';
         orderStatus = 'AWAITING_PAYMENT';
         paymentStatus = 'PENDING';

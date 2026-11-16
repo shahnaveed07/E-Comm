@@ -12,13 +12,16 @@ import {
   canCheckout,
   detectCardBrand,
   filterAdminOrders,
+  formatCurrency,
   getPersonalizedRecommendations,
+  getVariantAvailableStock,
   hasUserPurchasedProduct,
   removeCartItem,
   updateCartItemQuantity,
   validatePaymentCard,
   validateProductReviewInput,
   validateRegistrationInput,
+  validateUtrFormat,
 } from './commerce.js';
 
 test('calculateUnitPrice applies weight multiplier accurately', () => {
@@ -45,6 +48,19 @@ test('calculateCartTotals computes free shipping at $65+ threshold', () => {
   assert.equal(freeShippingBag.shippingFee, 0);
   assert.equal(freeShippingBag.freeShippingRemaining, 0);
   assert.equal(freeShippingBag.total, 66.0);
+});
+
+test('calculateCartTotals applies promo discounts and storeConfig thresholds', () => {
+  const discounted = calculateCartTotals(
+    [{ productId: 'prod-chandler-walnuts', weightSize: '16oz', quantity: 3 }],
+    INITIAL_CATALOG,
+    6.6,
+    { freeShippingThresholdMinor: 6500, standardShippingFeeMinor: 695 }
+  );
+  assert.equal(discounted.subtotal, 66.0);
+  assert.equal(discounted.discount, 6.6);
+  assert.equal(discounted.shippingFee, 6.95);
+  assert.equal(discounted.total, 66.35);
 });
 
 test('cart item helpers add, update quantity, and remove items cleanly', () => {
@@ -84,18 +100,20 @@ test('getPersonalizedRecommendations excludes allergens and prioritizes matching
   assert.equal(ids[0], 'prod-georgia-pecans');
 });
 
-test('calculateAdminOrderMetrics aggregates live, draft, status counts, and excludes cancelled revenue', () => {
+test('calculateAdminOrderMetrics excludes unpaid and cancelled orders from verified revenue', () => {
   const orders = [
-    { id: '1', status: 'placed', isLive: true, total: 50 },
-    { id: '2', status: 'in_transit', isLive: true, total: 75.5 },
-    { id: '3', status: 'placed', isLive: false, total: 30 },
-    { id: '4', status: 'cancelled', isLive: true, total: 100 },
+    { id: '1', status: 'placed', paymentStatus: 'CAPTURED', isLive: true, total: 50 },
+    { id: '2', status: 'in_transit', paymentStatus: 'CAPTURED', isLive: true, total: 75.5 },
+    { id: '3', status: 'awaiting_payment', paymentStatus: 'PENDING_MANUAL_VERIFICATION', isLive: true, total: 99 },
+    { id: '4', status: 'placed', isLive: false, total: 30 },
+    { id: '5', status: 'cancelled', paymentStatus: 'REFUNDED', isLive: true, total: 100 },
   ];
   const metrics = calculateAdminOrderMetrics(orders);
-  assert.equal(metrics.totalOrders, 4);
-  assert.equal(metrics.liveCount, 2);
+  assert.equal(metrics.totalOrders, 5);
+  assert.equal(metrics.liveCount, 3);
   assert.equal(metrics.draftCount, 1);
   assert.equal(metrics.awaitingPacking, 2);
+  assert.equal(metrics.awaitingPayment, 1);
   assert.equal(metrics.inTransit, 1);
   assert.equal(metrics.revenue, 155.5);
 });
@@ -153,7 +171,7 @@ test('validateRegistrationInput validates name, email, and password strength', (
   assert.equal(good.normalizedEmail, 'maya@example.com');
 });
 
-test('validatePaymentCard validates Luhn, expiry, CVC, and ZIP accurately', () => {
+test('validatePaymentCard and validateUtrFormat enforce payment validation rules', () => {
   const invalid = validatePaymentCard({
     cardNumber: '4111 1111 1111 1112',
     cardholderName: 'A',
@@ -180,6 +198,26 @@ test('validatePaymentCard validates Luhn, expiry, CVC, and ZIP accurately', () =
   assert.equal(valid.valid, true);
   assert.equal(detectCardBrand('4242 4242 4242 4242'), 'Visa');
   assert.equal(detectCardBrand('5500 0000 0000 0004'), 'Mastercard');
+
+  assert.equal(validateUtrFormat('431987654321'), true);
+  assert.equal(validateUtrFormat('UTR99182736455'), true);
+  assert.equal(validateUtrFormat('12345'), false);
+  assert.equal(validateUtrFormat('INVALID-UTR!'), false);
+});
+
+test('getVariantAvailableStock and formatCurrency handle stock math and multi-currency symbols', () => {
+  const sampleProduct = {
+    id: 'p-test',
+    inStock: true,
+    variants: [
+      { weightSize: '8oz', stockQuantity: 10, reservedStock: 4 },
+      { weightSize: '16oz', stockQuantity: 2, reservedStock: 2 },
+    ],
+  };
+  assert.equal(getVariantAvailableStock(sampleProduct, '8oz'), 6);
+  assert.equal(getVariantAvailableStock(sampleProduct, '16oz'), 0);
+  assert.equal(formatCurrency(1499.5, 'INR'), '₹1499.50');
+  assert.equal(formatCurrency(22, 'USD'), '$22.00');
 });
 
 test('calculateProductRatingSummary computes average, count, and star distribution', () => {

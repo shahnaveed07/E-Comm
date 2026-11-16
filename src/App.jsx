@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, CheckCircle2, ShieldAlert, X } from 'lucide-react';
 import { DEFAULT_PUBLIC_PREFERENCES, INITIAL_CATALOG, INITIAL_REVIEWS } from './data/catalog.js';
+import { apiFetch, ensureCsrfToken } from './services/api.js';
 import { AdminDashboard } from './components/AdminDashboard.jsx';
 import { AuthPanel } from './components/AuthPanel.jsx';
 import { Dashboard } from './components/Dashboard.jsx';
@@ -27,9 +28,16 @@ const PUBLIC_FALLBACK_STATE = {
   catalog: INITIAL_CATALOG,
   reviews: INITIAL_REVIEWS,
   preferences: DEFAULT_PUBLIC_PREFERENCES,
+  addresses: [],
+  wishlistProductIds: [],
   paymentMethods: [],
   invoices: [],
   orders: [],
+  returnRequests: [],
+  storeConfig: {
+    currency: 'USD',
+    paymentMethods: { cardToken: true, upiQr: false, razorpay: false, stripe: false },
+  },
 };
 
 const ROAST_LABELS = {
@@ -40,6 +48,8 @@ const ROAST_LABELS = {
 
 function getInitialViewFromHash() {
   if (typeof window === 'undefined') return 'shop';
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('resetToken')) return 'auth';
   const hash = window.location.hash.toLowerCase();
   if (hash === '#admin') return 'admin';
   if (hash === '#account') return 'account';
@@ -52,13 +62,18 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [activeView, setActiveView] = useState(getInitialViewFromHash);
   const [accountTab, setAccountTab] = useState('overview');
-  const [authMode, setAuthMode] = useState(() =>
-    typeof window !== 'undefined' && window.location.hash.toLowerCase() === '#register'
-      ? 'register'
-      : 'login'
-  );
+  const [initialResetToken, setInitialResetToken] = useState(() => {
+    if (typeof window === 'undefined') return '';
+    return new URLSearchParams(window.location.search).get('resetToken') || '';
+  });
+  const [authMode, setAuthMode] = useState(() => {
+    if (typeof window === 'undefined') return 'login';
+    if (new URLSearchParams(window.location.search).get('resetToken')) return 'reset';
+    return window.location.hash.toLowerCase() === '#register' ? 'register' : 'login';
+  });
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [isCartOpen, setIsCartOpen] = useState(false);
+  const [resumeUpiOrder, setResumeUpiOrder] = useState(null);
   const [liveNotice, setLiveNotice] = useState(null);
 
   const [cartItems, setCartItems] = useState(() => {
@@ -82,6 +97,13 @@ export default function App() {
     }
   }, [cartItems]);
 
+  const showNotice = useCallback((message) => {
+    setLiveNotice(message);
+    window.setTimeout(() => {
+      setLiveNotice((curr) => (curr === message ? null : curr));
+    }, 4500);
+  }, []);
+
   useEffect(() => {
     const onHashChange = () => {
       const next = getInitialViewFromHash();
@@ -98,24 +120,40 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
-    fetch('/api/state')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('Failed to load state'))))
+    ensureCsrfToken().catch(() => {});
+
+    apiFetch('/api/state')
       .then((data) => {
         if (mounted && data && Array.isArray(data.catalog)) {
           setStoreState(data);
         }
       })
       .catch(() => {
-        // Keep neutral public state if API unavailable
+        // Keep fallback public state if backend unreachable
       })
       .finally(() => {
         if (mounted) setIsLoading(false);
       });
 
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const verifyToken = params.get('verifyToken');
+      if (verifyToken) {
+        apiFetch('/api/auth/verify-email', {
+          method: 'POST',
+          body: JSON.stringify({ token: verifyToken }),
+        })
+          .then(() => {
+            if (mounted) showNotice('Email address verified. Thank you!');
+          })
+          .catch(() => {});
+      }
+    }
+
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [showNotice]);
 
   const currentUserId = storeState.user?.id || 'guest';
 
@@ -140,18 +178,12 @@ export default function App() {
     };
   }, [currentUserId]);
 
-  const showNotice = useCallback((message) => {
-    setLiveNotice(message);
-    window.setTimeout(() => {
-      setLiveNotice((curr) => (curr === message ? null : curr));
-    }, 4000);
-  }, []);
-
   const currentUser = storeState.user || null;
+  const currency = storeState.storeConfig?.currency || 'USD';
 
   const cartTotals = useMemo(
-    () => calculateCartTotals(cartItems, storeState.catalog),
-    [cartItems, storeState.catalog]
+    () => calculateCartTotals(cartItems, storeState.catalog, 0, storeState.storeConfig),
+    [cartItems, storeState.catalog, storeState.storeConfig]
   );
 
   const recommendations = useMemo(
@@ -197,6 +229,7 @@ export default function App() {
   };
 
   const handleNavigateAuth = (mode = 'login') => {
+    setInitialResetToken('');
     setAuthMode(mode);
     setActiveView('auth');
     updateHash(mode === 'register' ? '#register' : '#login');
@@ -204,41 +237,30 @@ export default function App() {
   };
 
   const handleLogin = async ({ email, password }) => {
-    const res = await fetch('/api/auth/login', {
+    const data = await apiFetch('/api/auth/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Sign in failed.');
-    }
     setStoreState(data.state);
     showNotice(`Welcome back, ${data.user.fullName}.`);
     return data;
   };
 
   const handleRegister = async ({ fullName, email, password }) => {
-    const res = await fetch('/api/auth/register', {
+    const data = await apiFetch('/api/auth/register', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ fullName, email, password }),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Account registration failed.');
-    }
     setStoreState(data.state);
     showNotice(`Account created for ${data.user.fullName}.`);
     return data;
   };
 
   const handleLogout = async () => {
-    const res = await fetch('/api/auth/logout', { method: 'POST' });
-    if (res.ok) {
-      const data = await res.json();
+    try {
+      const data = await apiFetch('/api/auth/logout', { method: 'POST' });
       setStoreState(data.state);
-    } else {
+    } catch {
       setStoreState((prev) => ({
         ...PUBLIC_FALLBACK_STATE,
         catalog: prev.catalog,
@@ -258,85 +280,78 @@ export default function App() {
     setCartItems((prev) => updateCartItemQuantity(prev, productId, weightSize, delta));
   };
 
+  const handleToggleWishlist = async (productId, shouldAdd) => {
+    if (!currentUser) {
+      handleNavigateAuth('login');
+      return;
+    }
+    const updated = await apiFetch(`/api/wishlist/${encodeURIComponent(productId)}`, {
+      method: shouldAdd ? 'POST' : 'DELETE',
+    });
+    setStoreState(updated);
+    showNotice(shouldAdd ? 'Saved harvest to your wishlist.' : 'Removed from wishlist.');
+  };
+
   const handleUpdatePreferences = async (patch, notice) => {
-    const res = await fetch('/api/preferences', {
+    const updated = await apiFetch('/api/preferences', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    if (res.ok) {
-      const updated = await res.json();
-      setStoreState(updated);
-      if (notice) showNotice(notice);
-    }
+    setStoreState(updated);
+    if (notice) showNotice(notice);
   };
 
   const handleAddPaymentMethod = async (payload) => {
-    const res = await fetch('/api/payment-methods', {
+    const data = await apiFetch('/api/payment-methods', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Could not save payment method.');
-    }
-    const data = await res.json();
     setStoreState(data.state);
     showNotice(`Saved ${data.card.brand} ending in ${data.card.last4}.`);
     return data.card;
   };
 
   const handleSetDefaultCard = async (id) => {
-    const res = await fetch(`/api/payment-methods/${id}/default`, {
+    const updated = await apiFetch(`/api/payment-methods/${encodeURIComponent(id)}/default`, {
       method: 'PATCH',
     });
-    if (res.ok) {
-      const updated = await res.json();
-      setStoreState(updated);
-      showNotice('Updated default checkout card.');
-    }
+    setStoreState(updated);
+    showNotice('Updated default checkout card.');
   };
 
   const handleRemoveCard = async (id) => {
-    const res = await fetch(`/api/payment-methods/${id}`, {
+    const updated = await apiFetch(`/api/payment-methods/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
-    if (res.ok) {
-      const updated = await res.json();
-      setStoreState(updated);
-      showNotice('Payment method removed.');
-    }
+    setStoreState(updated);
+    showNotice('Payment method removed.');
   };
 
   const handlePlaceOrder = async (payload) => {
-    const res = await fetch('/api/orders', {
+    const data = await apiFetch('/api/orders', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Checkout failed.');
-    }
-    const data = await res.json();
     setStoreState(data.state);
     setCartItems([]);
-    showNotice(`Order #${data.order.orderNumber} placed successfully.`);
+    showNotice(
+      data.order.status === 'awaiting_payment'
+        ? `Order #${data.order.orderNumber} created — complete payment to dispatch.`
+        : `Order #${data.order.orderNumber} placed successfully.`
+    );
     return data.order;
   };
 
+  const handlePayOrderUpi = (order) => {
+    setResumeUpiOrder(order);
+    setIsCartOpen(true);
+  };
+
   const handleCreateAdminOrder = async (payload) => {
-    const res = await fetch('/api/admin/orders', {
+    const data = await apiFetch('/api/admin/orders', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Could not publish order.');
-    }
-    const data = await res.json();
     setStoreState(data.state);
     showNotice(
       data.order.isLive
@@ -347,27 +362,20 @@ export default function App() {
   };
 
   const handleUpdateAdminOrder = async (id, patch, notice) => {
-    const res = await fetch(`/api/admin/orders/${id}`, {
+    const data = await apiFetch(`/api/admin/orders/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    if (res.ok) {
-      const data = await res.json();
-      setStoreState(data.state);
-      if (notice) showNotice(notice);
-    }
+    setStoreState(data.state);
+    if (notice) showNotice(notice);
   };
 
   const handleDeleteAdminOrder = async (id, orderNumber) => {
-    const res = await fetch(`/api/admin/orders/${id}`, {
+    const updated = await apiFetch(`/api/admin/orders/${encodeURIComponent(id)}`, {
       method: 'DELETE',
     });
-    if (res.ok) {
-      const updated = await res.json();
-      setStoreState(updated);
-      showNotice(`Removed order #${orderNumber}.`);
-    }
+    setStoreState(updated);
+    showNotice(`Archived order #${orderNumber}.`);
   };
 
   const handleReorderOrder = (order) => {
@@ -383,29 +391,21 @@ export default function App() {
   };
 
   const handleSubmitReview = async (productId, payload) => {
-    const res = await fetch(`/api/products/${encodeURIComponent(productId)}/reviews`, {
+    const data = await apiFetch(`/api/products/${encodeURIComponent(productId)}/reviews`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Could not post your review.');
-    }
     setStoreState(data.state);
     showNotice('Thank you! Your harvest review is now live.');
     return data.review;
   };
 
   const handleDeleteReview = async (reviewId) => {
-    const res = await fetch(`/api/reviews/${encodeURIComponent(reviewId)}`, {
+    const updated = await apiFetch(`/api/reviews/${encodeURIComponent(reviewId)}`, {
       method: 'DELETE',
     });
-    if (res.ok) {
-      const updated = await res.json();
-      setStoreState(updated);
-      showNotice('Review removed.');
-    }
+    setStoreState(updated);
+    showNotice('Review removed.');
   };
 
   const handleReviewProduct = (productId) => {
@@ -448,8 +448,9 @@ export default function App() {
             </div>
 
             <AuthPanel
-              key={authMode}
+              key={`${authMode}-${initialResetToken}`}
               initialMode={authMode}
+              initialResetToken={initialResetToken}
               headingLevel={1}
               headingId="auth-page-heading"
               heading={authMode === 'register' ? 'Create Orchard Account' : 'Sign In to Sylvan Grove'}
@@ -515,6 +516,9 @@ export default function App() {
           onRemoveCard={handleRemoveCard}
           onReorderOrder={handleReorderOrder}
           onReviewProduct={handleReviewProduct}
+          onPayOrderUpi={handlePayOrderUpi}
+          onRefreshState={setStoreState}
+          onToggleWishlist={handleToggleWishlist}
         />
       );
     }
@@ -543,7 +547,7 @@ export default function App() {
                 headingLevel={1}
                 headingId="admin-signin-heading"
                 heading="Administrator Authorization Required"
-                description="Sign in with an authorized administrator account to access the Admin Order Console."
+                description="Sign in with an authorized administrator account to access the Admin Operations Console."
                 onLogin={handleLogin}
                 onRegister={handleRegister}
                 onAuthenticated={(data) => {
@@ -578,7 +582,7 @@ export default function App() {
                 </h1>
                 <p className="text-sm text-[#4B5548]">
                   You are signed in as <span className="font-medium text-[#1C1915]">{currentUser.email}</span>{' '}
-                  with customer permissions. Only authorized administrators may open or manage the Admin Order Console.
+                  with customer permissions. Only authorized administrators may open or manage the Admin Operations Console.
                 </p>
                 <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
                   <button
@@ -609,6 +613,8 @@ export default function App() {
           onCreateAdminOrder={handleCreateAdminOrder}
           onUpdateAdminOrder={handleUpdateAdminOrder}
           onDeleteAdminOrder={handleDeleteAdminOrder}
+          onRefreshState={setStoreState}
+          onNotify={showNotice}
         />
       );
     }
@@ -624,12 +630,16 @@ export default function App() {
         <ProductCatalog
           catalog={storeState.catalog}
           reviews={storeState.reviews}
+          wishlistProductIds={storeState.wishlistProductIds || []}
+          currency={currency}
           onAddToCart={handleAddToCart}
           onSelectProduct={setSelectedProduct}
+          onToggleWishlist={handleToggleWishlist}
         />
         <RecommendationsSection
           recommendations={recommendations}
           preferredRoastLabel={ROAST_LABELS[storeState.preferences.preferredRoast]}
+          currency={currency}
           onAddToCart={handleAddToCart}
           onSelectProduct={setSelectedProduct}
           onOpenPreferences={() =>
@@ -692,6 +702,7 @@ export default function App() {
         reviews={storeState.reviews}
         orders={storeState.orders}
         currentUser={currentUser}
+        currency={currency}
         onClose={() => setSelectedProduct(null)}
         onAddToCart={handleAddToCart}
         onSubmitReview={handleSubmitReview}
@@ -705,11 +716,16 @@ export default function App() {
         catalog={storeState.catalog}
         currentUser={currentUser}
         paymentMethods={storeState.paymentMethods}
+        addresses={storeState.addresses || []}
         shippingAddress={storeState.preferences.shippingAddress}
+        storeConfig={storeState.storeConfig}
+        resumeUpiOrder={resumeUpiOrder}
+        onClearResumeOrder={() => setResumeUpiOrder(null)}
         onClose={() => setIsCartOpen(false)}
         onUpdateQuantity={handleUpdateCartQuantity}
         onPlaceOrder={handlePlaceOrder}
         onAddPaymentMethod={handleAddPaymentMethod}
+        onRefreshState={setStoreState}
         onLogin={handleLogin}
         onRegister={handleRegister}
         onTrackNewOrder={() => handleNavigateAccount('orders')}
